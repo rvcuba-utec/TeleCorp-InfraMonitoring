@@ -1,0 +1,9 @@
+.aws-sam/
+__pycache__/
+*.pyc
+.venv/
+.env
+*.pem
+samconfig.toml
+.pytest_cache/
+node_modules/
