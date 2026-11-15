@@ -1,7 +1,7 @@
 # Módulo GCP — Especificación completa (Data Engineering, Analytics e IA)
 
 > Documento **interno**. Fuente única para el módulo GCP. Usa la **numeración del README del equipo (RF-GCP-01…20)** y añade RF-GCP-21…31. Si algo choca con `REQUISITOS.md §3`, **manda este archivo**.
-> **P:** M = MVP · E = extra. Los puntos marcados **[D1]/[D3]** dependen de las decisiones de `DECISIONES.md`.
+> **P:** M = MVP · E = extra. Los puntos marcados **[D1]/[D3]** dependen de decisiones del equipo (D1: IA generativa incluida; D3: Azure acepta los 7 tipos de evento). Adoptadas por defecto en `docs/AWS.md` §0.
 
 ---
 

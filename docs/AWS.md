@@ -13,7 +13,7 @@
 4. Lo no verificado está marcado **[VERIFICAR]** y se resuelve en el Día 0 (§18).
 
 ### Decisiones adoptadas ("vamos con lo que tenemos")
-Estas son las respuestas que asumo a `docs/global/DECISIONES.md`. Cámbialas solo si el equipo lo decide.
+Estas son las decisiones que asumo para los puntos que el equipo no cerró. Cámbialas solo si el equipo lo decide.
 
 | Decisión | Valor adoptado | Efecto en AWS |
 |---|---|---|
