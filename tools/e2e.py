@@ -92,16 +92,16 @@ def execution(machine_arn, name):
         return None
 
 
-def pick_antennas(a, n):
+def pick_antennas(a, n, quiet_minutes=8, exclude=()):
     """Antenas en NORMAL, sin muestras recientes (así no chocan con otra corrida ni con el simulador)."""
     if a.call("GET", "/simulator/status", "operator")[1].get("active"):
         a.call("POST", "/simulator/stop", "operator", {})
         raise SystemExit("El simulador estaba activo y escribe en las 60 antenas cada minuto: lo detuve.\n"
                          "Vuelve a ejecutar esta prueba en ~8 minutos.")
     _, body, _ = a.call("GET", "/antennas", "operator")
-    cutoff = iso(minute(-8))
+    cutoff = iso(minute(-quiet_minutes))
     free = [x["antenna_id"] for x in body["antennas"] if x["state"] == "NORMAL" and not x["episode_id"]
-            and (not x["last_seen"] or x["last_seen"] < cutoff)]
+            and (not x["last_seen"] or x["last_seen"] < cutoff) and x["antenna_id"] not in exclude]
     free.reverse()  # desde la 060 hacia abajo: lejos de lo que use el simulador al azar
     if len(free) < n:
         raise SystemExit("no hay suficientes antenas libres: espera unos minutos o detén el simulador")
@@ -145,8 +145,11 @@ def smoke():
 def e2e():
     a = api()
     out = outputs()
-    ant, pre, rec_ant = pick_antennas(a, 3)
+    ant, pre = pick_antennas(a, 2)
+    rec_ant, = pick_antennas(a, 1, quiet_minutes=20, exclude=(ant, pre))  # recibe 18 min de historia
     print(f"Antenas de prueba: falla={ant} preventiva={pre} recurrencia={rec_ant}\n")
+    before = {d: {i["event_id"] for i in received(a, d)} for d in ("azure", "gcp")}
+    fresh = lambda dest: [i for i in received(a, dest) if i["event_id"] not in before[dest]]  # noqa: E731
 
     print("1) Ingesta, validación e idempotencia")
     code, r, _ = push(a, ant, [(-2, 95), (-1, 30), (0, 30)])
@@ -159,7 +162,7 @@ def e2e():
     check(a.call("POST", "/telemetry", "telemetry", {"x": 1})[0] == 400, "sobre inválido -> 400")
 
     print("\n2) Caída confirmada -> evento a Azure y GCP, y máquina de estados")
-    seen = lambda dest, text: any(i["summary"] == text for i in received(a, dest))  # noqa: E731
+    seen = lambda dest, text: any(i["summary"] == text for i in fresh(dest))  # noqa: E731
     wait_for("FALLA llega a Azure", lambda: seen("azure", f"FALLA {ant} CAIDA"), 120)
     wait_for("FALLA llega a GCP", lambda: seen("gcp", f"FALLA {ant} CAIDA"), 60)
     ep = f"EP-{ant}-{int(minute(-1).timestamp())}"
@@ -173,7 +176,7 @@ def e2e():
     wait_for("RECUPERACION llega a Azure", lambda: seen("azure", f"RECUPERACION {ant} NORMAL"), 120)
     done = wait_for("la máquina de estados termina", lambda: (execution(out["IncidentLifecycleArn"], ep) or {}).get("status") == "SUCCEEDED", 180, 5)
     time.sleep(3)
-    counts = Counter(i["summary"] for i in received(a, "azure"))
+    counts = Counter(i["summary"] for i in fresh("azure"))
     check(counts[f"RECUPERACION {ant} NORMAL"] == 1, "RECUPERACION publicada exactamente una vez")
     check(counts[f"FALLA {ant} CAIDA"] == 1, "FALLA publicada exactamente una vez")
     if done:
@@ -189,17 +192,14 @@ def e2e():
     wait_for("PREVENTIVA llega a Azure", lambda: seen("azure", f"PREVENTIVA {pre} CAIDA"), 90)
     code, r, _ = a.call("POST", "/predictions", "gcp", preds(0.83, pre))
     check(r.get("duplicates") == 1, "reenviar la misma predicción es idempotente")
-    p_ex = execution(out["PreventiveAlertArn"], f"{pre}-{int(minute().timestamp())}")
+    p_ex = execution(out["PreventiveAlertArn"], f"{pre}-{int(datetime.strptime(gen, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc).timestamp())}")
     check(p_ex is not None, "SF preventive-alert ejecutada")
     code, r, _ = a.call("GET", "/predictions?min_probability=0.8", "azure")
     check(code == 200 and any(p["antenna_id"] == pre for p in r["predictions"]), "GET /predictions la devuelve")
     check(a.call("POST", "/predictions", "azure", preds(0.9, pre))[0] == 403, "Azure no puede enviar predicciones -> 403")
 
     print("\n5) Tres episodios en una antena -> recurrence-analysis -> ESTRUCTURAL")
-    series = []
-    for k in range(3):
-        base = -85 + k * 20
-        series += [(base, 95), (base + 1, 30), (base + 2, 30), (base + 3, 95), (base + 4, 95), (base + 5, 95)]
+    series = [(-19 + i, g) for i, g in enumerate([95, 30, 30, 95, 95, 95] * 3)]  # 3 episodios en el pasado
     code, r, _ = push(a, rec_ant, series)
     check(code == 202 and r["accepted"] == 18, "18 muestras históricas (3 episodios) aceptadas")
     time.sleep(8)
@@ -218,7 +218,9 @@ def resilience():
     ant, = pick_antennas(a, 1)
     sqs = client("sqs")
     depth = lambda k: int(sqs.get_queue_attributes(QueueUrl=out[k], AttributeNames=["ApproximateNumberOfMessages"])["Attributes"]["ApproximateNumberOfMessages"])  # noqa: E731
-    seen = lambda text: any(i["summary"] == text for i in received(a, "azure"))  # noqa: E731
+    before = {i["event_id"] for i in received(a, "azure")}
+    new = lambda text: [i for i in received(a, "azure") if i["summary"] == text and i["event_id"] not in before]  # noqa: E731
+    seen = lambda text: bool(new(text))  # noqa: E731
     print(f"Antena de prueba: {ant}\n1) Receptor caído (503)")
     check(a.call("POST", "/mock/mode", "operator", {"fail": True, "status": 503})[0] == 200, "receptor simulado en modo caído")
     try:
@@ -235,8 +237,9 @@ def resilience():
     wait_for("el evento se entrega tras el reenvío", lambda: seen(f"FALLA {ant} CAIDA"), 240, 5)
     wait_for("event-redelivery termina", lambda: sfn.describe_execution(executionArn=arn)["status"] == "SUCCEEDED", 240, 5)
     time.sleep(3)
-    check(Counter(i["summary"] for i in received(a, "azure"))[f"FALLA {ant} CAIDA"] == 1, "entregado exactamente una vez (sin duplicados)")
+    check(len(new(f"FALLA {ant} CAIDA")) == 1, "entregado exactamente una vez (sin duplicados)")
     check(depth("OutboxAzureDlqUrl") == 0, "la DLQ de Azure quedó vacía")
+    push(a, ant, [(1, 95), (2, 95), (3, 95)])  # deja la antena en NORMAL: la SF del episodio termina sola
     return finish("resilience")
 
 
